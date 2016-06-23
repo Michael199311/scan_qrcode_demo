@@ -1,0 +1,535 @@
+//
+//  ViewController.m
+//  scan_qrcode_demo
+//
+//  Created by strivingboy on 14/11/3.
+//
+//
+
+#import "SQScanViewController.h"
+#import "SQModelTboxInfo.h"
+#import "NSObject+MJKeyValue.h"
+#import <SVProgressHUD/SVProgressHUD.h>
+#import <AVFoundation/AVFoundation.h>
+#import <MBProgressHUD/MBProgressHUD.h>
+#import <JDStatusBarNotification/JDStatusBarNotification.h>
+#import "ASIHTTPRequest.h"
+#import "SQItemTMSHandler.h"
+#import "ASIFormDataRequest.h"
+#import "SQModelLocation.h"
+#import "BluetoothAPI.h"
+#import "UIDevice+CurrentDevice.h"
+#import "CRBimaSwitch.h"
+#import "UIView+CRAdditions.h"
+#import "UIView+LayoutMethods.h"
+
+
+static const char *kScanQRCodeQueueName = "ScanQRCodeQueue";
+
+@interface SQScanViewController () <AVCaptureMetadataOutputObjectsDelegate,UIAlertViewDelegate,UITextFieldDelegate,BluetoothAPIDelegate>{
+    
+    SQModelTboxInfo *TCUInfo;
+    
+}
+
+@property (weak, nonatomic) IBOutlet UIView *sanFrameView;
+@property (weak, nonatomic) IBOutlet NSLayoutConstraint *lockAndUnlockViewHeight;
+@property (weak, nonatomic) IBOutlet NSLayoutConstraint *operationViewHeigh;
+@property (nonatomic, strong) CRBimaSwitch *bimaSwitch;
+@property (weak, nonatomic) IBOutlet UIView *lockAndUnlockView;
+@property (weak, nonatomic) IBOutlet UIView *operationView;
+@property (weak, nonatomic) IBOutlet UIButton *unlockButton;
+@property (weak, nonatomic) IBOutlet UIButton *lockButton;
+@property (weak, nonatomic) IBOutlet UIButton *whistleButton;
+@property (weak, nonatomic) IBOutlet UIButton *fireButton;
+@property (weak, nonatomic) IBOutlet UIButton *returnCarButton;
+/**
+ *  车锁开关状态 YES 门锁着
+ */
+@property (assign, nonatomic) BOOL isLock;
+@property (nonatomic) AVCaptureSession *captureSession;
+@property (nonatomic) AVCaptureVideoPreviewLayer *videoPreviewLayer;
+@property (nonatomic) BOOL lastResut;
+@property (nonatomic, strong) NSString *result;
+@property (nonatomic, strong) NSMutableArray *locationsArr;
+@property (nonatomic, strong) NSMutableArray *tboxsArr;
+@end
+
+@implementation SQScanViewController
+
+- (void)viewDidLoad
+{
+    [super viewDidLoad];
+    self.navigationItem.title = @"二维码扫描";
+    [self startReading];
+    //[self grubUrl];
+    _lastResut = YES;
+    self.isLock = YES;
+    [self configDefaultView];
+    [self connectTbox];
+}
+
+- (void)dealloc
+{
+    [self stopReading];
+}
+
+- (IBAction)unlock:(id)sender {
+    if (self.isLock == YES) {
+        [SVProgressHUD showWithStatus:@"开门中，请稍后" maskType:SVProgressHUDMaskTypeGradient];
+        //当前门锁着,发送锁门指令
+        [[BluetoothAPI sharedInstance] TCUPostRequestWithInstruction:MTInstructionUnLockDoor firePin:nil];
+    }else{
+        [SVProgressHUD showErrorWithStatus:@"当前车辆已经是开门状态"];
+    }
+}
+- (IBAction)lock:(id)sender {
+    if (self.isLock == NO){
+        [SVProgressHUD showWithStatus:@"锁门中，请稍后" maskType:SVProgressHUDMaskTypeGradient];
+        //当前门开着,发送锁门指令
+        [[BluetoothAPI sharedInstance] TCUPostRequestWithInstruction:MTInstructionLockDoor firePin:nil];
+    }else{
+        [SVProgressHUD showErrorWithStatus:@"当前车辆已经是锁门状态"];
+    }
+}
+- (IBAction)whistle:(id)sender {
+    [self userButtonIsEnable:NO];
+    [[BluetoothAPI sharedInstance] TCUPostRequestWithInstruction:MTInstructionWhistle firePin:nil];
+}
+- (IBAction)start:(id)sender {
+    [self userButtonIsEnable:NO];
+    [[BluetoothAPI sharedInstance] TCUPostRequestWithInstruction:MTInstructionFireCar firePin:@"111111"];
+}
+- (IBAction)returnCar:(id)sender {
+    //[[BluetoothAPI sharedInstance] TCUPostRequestWithInstruction:MTInstructionReturnCar firePin:@"111111"];
+}
+
+
+#pragma mark - private methods
+
+- (void)configDefaultView{
+    [self.lockAndUnlockView makeCornerRadiusOfRadius:3 andBorderWidth:1 andBorderColor:[UIColor colorWithRed:206 green:206 blue:209 alpha:1]];
+    [self.operationView makeCornerRadiusOfRadius:3 andBorderWidth:1 andBorderColor:[UIColor colorWithRed:206 green:206 blue:209 alpha:1]];
+    iPhoneModel currentDeviceModel = [UIDevice iphoneModel];
+    switch (currentDeviceModel) {
+        case iPhoneModelIPhone4:
+            _lockAndUnlockViewHeight.constant = 40;
+            _operationViewHeigh.constant = 67.61;
+            break;
+        case iPhoneModelIPhone5:
+            _lockAndUnlockViewHeight.constant = 49;
+            _operationViewHeigh.constant = 80;
+            break;
+        case iPhoneModelIPhone6:
+            _lockAndUnlockViewHeight.constant = 55;
+            _operationViewHeigh.constant = 93.94;
+            break;
+        case iPhoneModelIPhone6Plus:
+            _lockAndUnlockViewHeight.constant = 60;
+            _operationViewHeigh.constant = 103.66;
+            break;
+        default:
+            break;
+    }
+    _bimaSwitch = [CRBimaSwitch loadNibName:@"CRBimaSwitch"];
+    _bimaSwitch.frame = CGRectMake(self.view.width / 2.0 - 58 ,( _lockAndUnlockViewHeight.constant-49)/2.0 + 3, 116, 49);
+    __weak typeof(self)weekSelf = self;
+    _bimaSwitch.buttonActionBlock = ^(NSDictionary *info, NSInteger type){
+        switch (type) {
+            case 0:
+                //开门
+                [weekSelf unlock:nil];
+                break;
+            case 1:
+                //关门
+                [weekSelf lock:nil];
+                break;
+            case 2:
+                //点击了switchBall
+                break;
+            default:
+                break;
+        }
+    };
+    [self.lockAndUnlockView addSubview:_bimaSwitch];
+    //防止用户同上点击开关门、点火、还车、鸣笛等按钮
+    [self.bimaSwitch setExclusiveTouch:YES];
+    [self.unlockButton setExclusiveTouch:YES];
+    [self.lockButton setExclusiveTouch:YES];
+    [self.whistleButton setExclusiveTouch:YES];
+    [self.fireButton setExclusiveTouch:YES];
+    [self.returnCarButton setExclusiveTouch:YES];
+}
+
+- (BOOL)startReading
+{
+    // 获取 AVCaptureDevice 实例
+    NSError * error;
+    AVCaptureDevice *captureDevice = [AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeVideo];
+    // 初始化输入流
+    AVCaptureDeviceInput *input = [AVCaptureDeviceInput deviceInputWithDevice:captureDevice error:&error];
+    if (!input) {
+        NSLog(@"%@", [error localizedDescription]);
+        return NO;
+    }
+    // 创建会话
+    _captureSession = [[AVCaptureSession alloc] init];
+    // 添加输入流
+    [_captureSession addInput:input];
+    // 初始化输出流
+    AVCaptureMetadataOutput *captureMetadataOutput = [[AVCaptureMetadataOutput alloc] init];
+    // 添加输出流
+    [_captureSession addOutput:captureMetadataOutput];
+    
+    // 创建dispatch queue.
+    dispatch_queue_t dispatchQueue;
+    dispatchQueue = dispatch_queue_create(kScanQRCodeQueueName, NULL);
+    [captureMetadataOutput setMetadataObjectsDelegate:self queue:dispatchQueue];
+    // 设置元数据类型 AVMetadataObjectTypeQRCode
+    [captureMetadataOutput setMetadataObjectTypes:[NSArray arrayWithObject:AVMetadataObjectTypeQRCode]];
+    
+    // 创建输出对象
+    _videoPreviewLayer = [[AVCaptureVideoPreviewLayer alloc] initWithSession:_captureSession];
+    [_videoPreviewLayer setVideoGravity:AVLayerVideoGravityResizeAspectFill];
+    [_videoPreviewLayer setFrame:_sanFrameView.layer.bounds];
+    [_sanFrameView.layer addSublayer:_videoPreviewLayer];
+    // 开始会话
+    [_captureSession startRunning];
+    
+    return YES;
+}
+
+- (void)stopReading
+{
+    // 停止会话
+    [_captureSession stopRunning];
+    _captureSession = nil;
+}
+
+- (void)reportScanResult:(NSString *)result
+{
+    [self stopReading];
+    if (!_lastResut) {
+        return;
+    }
+    _lastResut = NO;
+    [self commitScanInfoWithResult:result];
+    // 以及处理了结果，下次扫描
+    _lastResut = YES;
+}
+
+- (void)systemLightSwitch:(BOOL)open
+{
+    AVCaptureDevice *device = [AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeVideo];
+    if ([device hasTorch]) {
+        [device lockForConfiguration:nil];
+        if (open) {
+            [device setTorchMode:AVCaptureTorchModeOn];
+        } else {
+            [device setTorchMode:AVCaptureTorchModeOff];
+        }
+        [device unlockForConfiguration];
+    }else{
+        [SVProgressHUD showErrorWithStatus:@"该设备没有照明灯"];
+    }
+}
+
+- (void)commitScanInfoWithResult:(NSString *)result{
+    
+}
+
+- (void)clearBoundInfo{
+    TCUInfo = nil;
+}
+
+/**
+ *  蓝牙连接Tbox
+ */
+- (void)connectTbox{
+    [BluetoothAPI sharedInstance].isPair = YES;
+    [BluetoothAPI sharedInstance].delegate = self;
+    [[BluetoothAPI sharedInstance] start:@"JXTECH" withId:@"111111"];
+}
+/**
+ *  获取Tbox信息：iccid/version/tcuid
+ */
+- (void)getTboxInfo{
+    //向tbox获取信息
+    [BluetoothAPI sharedInstance].scanInfo = self.result;
+    [[BluetoothAPI sharedInstance] TCUPostRequestWithInstruction:MTInstructionGetParameter firePin:nil];
+}
+
+/**
+ *  上传Tbox信息到TMS
+ */
+- (void)uploadTboxInfo{
+#warning 还需要跟李海宾确认盒子返回的参数
+    NSDictionary *postDic = @{@"id":@"402880845398a8a60153c653b5990003",
+                              @"name": @"iostestString",
+                              @"code": @"string",
+                              @"address": @"string",
+                              @"description": @"string",
+                              @"manInCharge": @"string",
+                              @"manInChargeContact": @"string",
+                              @"type": @"01",
+                              @"createdUserid": @"string",
+                              @"createdTime": @"2016-03-29T05:20:41.603Z",
+                              @"isDeleted": @false
+                              };
+    SQItemTMSHandler *handler = [SQItemTMSHandler new];
+    handler.parameterDic = postDic;
+    handler.functionName = @"tboxs/";
+    [handler handleTMSRequestWithHttpMethod:@"POST" block:^(id responseObject, NSError *error) {
+        if (error) {
+            [SVProgressHUD showErrorWithStatus:error.domain];
+        }else{
+            [SVProgressHUD showSuccessWithStatus:@"上传Tbox信息成功"];
+        }
+    }];
+}
+
+- (void)userButtonIsEnable:(BOOL)enable{
+    
+}
+
+- (void)leftButtonAction{
+    [self.navigationController popViewControllerAnimated:YES];
+}
+
+#pragma AVCaptureMetadataOutputObjectsDelegate
+
+-(void)captureOutput:(AVCaptureOutput *)captureOutput didOutputMetadataObjects:(NSArray *)metadataObjects
+      fromConnection:(AVCaptureConnection *)connection
+{
+    if (metadataObjects != nil && [metadataObjects count] > 0) {
+        AVMetadataMachineReadableCodeObject *metadataObj = [metadataObjects objectAtIndex:0];
+        NSString *result;
+        if ([[metadataObj type] isEqualToString:AVMetadataObjectTypeQRCode]) {
+            result = metadataObj.stringValue;
+            self.result = result;
+            NSLog(@"扫描出来的二维码是:%@",result);
+        } else {
+            result = @"不是二维码";
+            NSLog(@"不是二维码");
+        }
+        UIAlertView *alert = [[UIAlertView alloc] initWithTitle:@"扫描结果" message:result delegate:self cancelButtonTitle:@"配置TCU" otherButtonTitles:@"取消", nil];
+        alert.tag = 1;
+        [alert show];
+        
+        //[self performSelectorOnMainThread:@selector(reportScanResult:) withObject:result waitUntilDone:NO];
+    }
+}
+
+#pragma BlueToothAPIDelegate
+
+
+
+#pragma mark - UIAlertViewDelegate
+
+- (void)alertView:(UIAlertView *)alertView clickedButtonAtIndex:(NSInteger)buttonIndex{
+    if (alertView.tag == 1) {
+        if (buttonIndex == 0) {
+            //配置TCU
+            [self getTboxInfo];
+        }else if (buttonIndex == 1){
+            //不配置TCU，重新扫描
+            [self startReading];
+        }
+    }
+}
+
+#pragma mark - BlueToothDelegate
+- (void)scanning{
+    //[SVProgressHUD showWithStatus:@"连接Tbox中，请稍候" maskType:SVProgressHUDMaskTypeNone];
+    NSLog(@"扫描中...");
+}
+
+- (void)didConnect{
+    [JDStatusBarNotification dismissAnimated:YES];
+}
+
+-(void)failToConnect
+{
+    [JDStatusBarNotification showWithStatus:@"蓝牙链接失败" styleName:JDStatusBarStyleError];
+}
+- (void)didDisConnect
+{
+    [JDStatusBarNotification showWithStatus:@"蓝牙链接已断开" styleName:JDStatusBarStyleError];
+}
+
+- (void)timerToShow:(NSNumber *)rssi{
+    NSLog(@"当前蓝牙信号强度:%@",rssi);
+}
+
+- (void)requestToTCUSuccess:(TMInstructionSuccess)instrucionSuccess{
+    switch (instrucionSuccess) {
+        case TMInstructionSuccessGetParameter:
+            [self uploadTboxInfo];
+            [self userButtonIsEnable:YES];
+            break;
+        case TMInstructionSuccessCheckVersion:{
+            [[BluetoothAPI sharedInstance] TCUPostRequestWithInstruction:MTInstructionTCUPair firePin:nil];//配对
+            [self userButtonIsEnable:NO];
+            break;
+        }
+        case TMInstructionSuccessPair: {
+            [self userButtonIsEnable:YES];
+            [SVProgressHUD dismiss];
+            break;
+        }
+        case TMInstructionSuccessWhsitle: {
+            [SVProgressHUD showSuccessWithStatus:@"鸣笛成功"];
+            [self userButtonIsEnable:YES];
+            break;
+        }
+        case TMInstructionSuccessUnlock: {
+            //得到开锁成功与否的消息之后控件恢复可以交互的状态
+            [SVProgressHUD showSuccessWithStatus:@"开门成功"];
+            [self.bimaSwitch setSwitchState:CRBimaSwitchStateRight];
+            if ([BluetoothAPI sharedInstance].firstOpenTime) {
+                [BluetoothAPI sharedInstance].firstOpenTime = nil;
+            }
+            self.isLock = NO;
+            break;
+        }
+        case TMInstructionSuccessLock: {
+            [SVProgressHUD showSuccessWithStatus:@"上锁成功"];
+            [self.bimaSwitch setSwitchState:CRBimaSwitchStateLeft];
+            [self userButtonIsEnable:YES];
+            self.isLock = YES;
+            break;
+        }
+        case TMInstructionSuccessFire: {
+            [SVProgressHUD showSuccessWithStatus:@"点火成功，请发动汽车"];
+            [self userButtonIsEnable:YES];
+            break;
+        }
+        case TMInstructionSuccessGPS: {
+            [self userButtonIsEnable:NO];
+            break;
+        }
+        case TMInstructionSuccessReturnCar: {
+            NSLog(@"用车----------还车成功");
+            [SVProgressHUD dismiss];
+            break;
+        }
+        default: {
+            break;
+        }
+    }
+}
+
+- (void)requestToTCUFailure:(TMInstructionFailure)instructionFailure{
+    switch (instructionFailure) {
+        case TMInstructionFailureGetParameter:{
+            [SVProgressHUD showErrorWithStatus:@"获取TCU参数错误"];
+            break;
+        }
+        case TMInstructionFailureCheckError:{
+            [SVProgressHUD showErrorWithStatus:@"校验错误"];
+            break;
+        }
+        case TMInstructionFailurePairOrderLock: {
+            [SVProgressHUD showErrorWithStatus:@"当前订单已完结，请重新下单"];
+            [NSTimer scheduledTimerWithTimeInterval:1 target:self selector:@selector(leftButtonAction) userInfo:nil repeats:NO];
+            break;
+        }
+        case TMInstructionFailurePairFail:
+        case TMInstructionFailurePairCodeError: {
+            [SVProgressHUD showErrorWithStatus:@"车辆派送失败，请稍后重试"];
+            [NSTimer scheduledTimerWithTimeInterval:1 target:self selector:@selector(leftButtonAction) userInfo:nil repeats:NO];
+            break;
+        }
+        case TMInstructionFailureWhsitle: {
+            [SVProgressHUD showErrorWithStatus:@"鸣笛失败，请重试"];
+            break;
+        }
+        case TMInstructionFailureUnlock: {
+            //开锁失败，开关状态回到锁门状态
+            [SVProgressHUD showErrorWithStatus:@"开门失败，请重试"];
+            break;
+        }
+        case TMInstructionFailureLock: {
+            [SVProgressHUD showErrorWithStatus:@"上锁失败，请重试"];
+            break;
+        }
+        case TMInstructionFailureCarIsRunning:{
+            [SVProgressHUD showErrorWithStatus:@"车正在行驶中，无法进行此操作"];
+            break;
+        }
+        case TMInstructionFailureFire: {
+            [SVProgressHUD showErrorWithStatus:@"点火失败，请重试"];
+            
+            break;
+        }
+        case TMInstructionFailureFireCodeError: {
+            [SVProgressHUD showErrorWithStatus:@"pin码错误,请重新输入"];
+            
+            break;
+        }
+        case TMInstructionFailureFirePullCharningLine: {
+            [SVProgressHUD showErrorWithStatus:@"充电线未拔，请拔下充电线后再点火"];
+            
+            break;
+        }
+        case TMInstructionFailureReturnUnlock: {
+            [SVProgressHUD showErrorWithStatus:@"车门未锁，请锁好车门，再还车"];
+            break;
+        }
+        case TMInstructionFailureReturnInsertChargingLine: {
+            [SVProgressHUD showErrorWithStatus:@"请插入充电线并确认充电后再还车"];
+            break;
+        }
+        case TMInstructionFailureReturnKeyNotOff: {
+            [SVProgressHUD showErrorWithStatus:@"请将车钥匙拧到off后再还车"];
+            break;
+        }
+        case TMInstructionFailureReturnWrongStation: {
+            [SVProgressHUD showErrorWithStatus:@"当前还车站点不是指定还车站点"];
+            break;
+        }
+        case TMInstructionFailureReturnUnChargeing: {
+            [SVProgressHUD showErrorWithStatus:@"请确认车辆充电后再还车"];
+            break;
+        }
+        case TMInstructionFailureReturnError: {
+            [SVProgressHUD showErrorWithStatus:@"还车失败，请重试"];
+            break;
+        }case TMInstructionFailureGpsError:{
+            [SVProgressHUD showErrorWithStatus:@"gps模块错误"];
+            break;
+        }case TMInstructionFailureGprsError:{
+            [SVProgressHUD showErrorWithStatus:@"gprs模块错误"];
+            break;
+        }case TMInstructionFailureEppromError:{
+            [SVProgressHUD showErrorWithStatus:@"epprom错误"];
+            break;
+        }
+        default: {
+            break;
+        }
+    }
+    [self userButtonIsEnable:YES];
+    
+}
+
+- (void)didReceiveMemoryWarning {
+    [super didReceiveMemoryWarning];
+    // Dispose of any resources that can be recreated.
+}
+
+- (NSMutableArray *)locationsArr{
+    if (!_locationsArr) {
+        _locationsArr = [[NSMutableArray alloc] init];
+    }
+    return _locationsArr;
+}
+
+- (NSMutableArray *)tboxsArr{
+    if (!_tboxsArr) {
+        _tboxsArr = [[NSMutableArray alloc] init];
+    }
+    return _tboxsArr;
+}
+
+@end

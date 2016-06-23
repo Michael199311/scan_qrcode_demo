@@ -1,0 +1,747 @@
+//
+//  BluetoothAPI.m
+//  BluetoothAPIDemo
+//
+//  Created by YangYuxin on 15/4/25.
+//  Copyright (c) 2015年 YYX. All rights reserved.
+//
+
+#import "BluetoothAPI.h"
+#import <UIKit/UIKit.h>
+
+static CGFloat requestTimeoutTime = 30.0f;//TCU交互超时时间
+
+static NSString *version = @"V1.0.0";
+
+#pragma mark - Class BLEInfo
+@interface BLEInfo : NSObject
+@property (nonatomic, strong) CBPeripheral *discoveredPeripheral;
+@property (nonatomic, strong) NSNumber *rssi;
+@end
+
+@implementation BLEInfo
+
+@end
+
+
+#pragma mark - Interface
+@interface BluetoothAPI()<UIAlertViewDelegate>
+{
+    BOOL requestTimeout;//记录链接超时,YES TCU接收到的指令不接受
+    NSTimer* requestTimer;//TCU请求计时器
+    int count;//pair次数
+}
+
+@property (nonatomic, strong) BLEInfo* bleInfo;
+
+@property (nonatomic, strong) CBCentralManager *centralMgr;
+/**
+ *  汽车上TBOX标示
+ */
+@property (nonatomic, strong) NSString* carName;
+/**
+ *  链接TBXO的配对码
+ */
+@property (nonatomic, strong) NSString* identify;
+/**
+ *  用户PIN码
+ */
+@property (nonatomic, strong) NSString *pin;
+
+
+/**
+ *  用于保存当前的特征
+ */
+@property (nonatomic, strong) CBCharacteristic* value;
+/**
+ *  记录接收信息的状态，开门、点火时间信息需要分两次接收，还车的时间和GPS信息需要分3次接收(一次只能接受20字节的数据)
+ 1:开门时间接收了一半 2：开门时间接收完毕 3：点火时间接收了一半  4：点火时间接收完毕 5：还车信息接收了前1/3  6:还车信息接收了前2/3  7：换车信息接收完毕
+ */
+@property (nonatomic, assign) NSInteger receiveState;
+/**
+ *  数据buffer(有些数据要多次接收才能完全接收)
+ */
+@property (nonatomic, strong) NSMutableData *data;
+
+@end
+
+static BluetoothAPI* _bluetoothApi = nil;
+
+#pragma mark - Implementation
+@implementation BluetoothAPI
+
++ (BluetoothAPI*)sharedInstance
+{
+    if(_bluetoothApi==nil)
+    {
+        _bluetoothApi=[[BluetoothAPI alloc] init];
+    }
+    return _bluetoothApi;
+}
+
+#pragma mark - Initial
+-(CBCentralManager *)centralMgr
+{
+    if (_centralMgr==nil) {
+        _centralMgr=[[CBCentralManager alloc] initWithDelegate:self queue:nil options:@{CBCentralManagerOptionShowPowerAlertKey:@YES}];
+    }
+    return _centralMgr;
+}
+
+- (BLEInfo *)bleInfo
+{
+    if (_bleInfo==nil) {
+        _bleInfo=[[BLEInfo alloc] init];
+    }
+    return _bleInfo;
+}
+
+#pragma mark - Private method
+- (void)startRequestTime
+{
+    requestTimeout = NO;
+    requestTimer = [NSTimer timerWithTimeInterval:requestTimeoutTime target:self selector:@selector(TCUTimeOut) userInfo:nil repeats:NO];
+}
+
+- (void)stopRequestTime
+{
+    [requestTimer invalidate];
+    requestTimer = nil;
+}
+- (void)TCUTimeOut
+{
+    [self stopRequestTime];
+    requestTimeout = YES;
+    count = 0;
+    if ([self.delegate respondsToSelector:@selector(requestToTCUFailure:)]) {
+        [self.delegate requestToTCUFailure:[self transformUnknowInstruction]];
+    }
+}
+
+- (NSData *)transformInstructionWithUserOpertion:(MTInstruction)opertion
+{
+    NSData *sendInstruction = nil;
+    switch (opertion) {
+        case MTInstructionCheckVersion:
+        {
+            NSInteger length = version.length;
+            NSString *temp = [NSString stringWithFormat:@"[MT%02dCVR%@",(3+length),version];
+            sendInstruction = [[self strConnect:@"" :temp :8 + length] dataUsingEncoding:NSASCIIStringEncoding];
+            break;
+        }
+        case MTInstructionTCUPair:{
+            NSString* temp=[self strConnect:@"" :[@"[MT09AUT" stringByAppendingString:self.identify] :14];
+            sendInstruction = [temp dataUsingEncoding:NSASCIIStringEncoding];
+            break;
+        }
+        case MTInstructionWhistle: {
+            sendInstruction = [[self strConnect:@"" :@"[MT03WHC" :8] dataUsingEncoding:NSASCIIStringEncoding];
+            break;
+        }
+        case MTInstructionLockDoor: {
+            sendInstruction = [[self strConnect:@"" :@"[MT03LCK" :8] dataUsingEncoding:NSASCIIStringEncoding];
+            break;
+        }
+        case MTInstructionUnLockDoor: {
+            sendInstruction = [[self strConnect:@"" :@"[MT03OPN" :8] dataUsingEncoding:NSASCIIStringEncoding];
+            break;
+        }
+        case MTInstructionFireCar: {
+            NSString* temp=[self strConnect:@"" :[@"[MT09STR" stringByAppendingString:self.pin]:14];
+            sendInstruction =[temp dataUsingEncoding:NSASCIIStringEncoding];
+            break;
+        }
+        case MTInstructionCheckGps: {
+            sendInstruction = [[self strConnect:@"" :@"[MT03AVA" :8] dataUsingEncoding:NSASCIIStringEncoding];
+            break;
+        }
+        case MTInstructionReturnCar: {
+            NSInteger length = self.returnCarCommand.length;
+            NSString *returnCarStr = [NSString stringWithFormat:@"[MT%02dRTC%@",(3+length), self.returnCarCommand];
+            NSLog(@"发送的还车指令:%@",returnCarStr);
+            sendInstruction = [[self strConnect:@"" :returnCarStr :8 + length] dataUsingEncoding:NSASCIIStringEncoding];
+            break;
+        }
+        case MTInstructionGetParameter: {
+            NSInteger length = self.scanInfo.length;
+            NSString *scanInfoStr = [NSString stringWithFormat:@"[MT%02dTID%@",(3+length), self.scanInfo];
+            NSLog(@"发送的二维码信息指令:%@",scanInfoStr);
+            sendInstruction = [[self strConnect:@"" :scanInfoStr :8 + length] dataUsingEncoding:NSASCIIStringEncoding];
+            break;
+        }
+        case MTInstructionButtonCheck: {
+            sendInstruction = [[self strConnect:@"" :@"[MT03BUT" :8] dataUsingEncoding:NSASCIIStringEncoding];
+            break;
+        }
+        default: {
+            break;
+        }
+    }
+    return sendInstruction;
+}
+
+- (TMInstructionFailure)transformUnknowInstruction
+{
+    switch (self.currentInstruction) {
+        case MTInstructionTCUPair: {
+            return TMInstructionFailurePairFail;
+            break;
+        }
+        case MTInstructionWhistle: {
+            return TMInstructionFailureWhsitle;
+            break;
+        }
+        case MTInstructionLockDoor: {
+            return TMInstructionFailureLock;
+            break;
+        }
+        case MTInstructionUnLockDoor: {
+            return TMInstructionFailureUnlock;
+            break;
+        }
+        case MTInstructionFireCar: {
+            return TMInstructionFailureFire;
+            break;
+        }
+        case MTInstructionCheckGps: {
+            return TMInstructionFailureCheckGps;
+        }
+        case MTInstructionReturnCar: {
+            return TMInstructionFailureReturnError;
+            break;
+        }
+        case MTInstructionCheckVersion: {
+            return TMInstructionFailureCheckError;
+            break;
+        }
+        case MTInstructionGetParameter:{
+            return TMInstructionFailureGetParameter;
+            break;
+        }case MTInstructionButtonCheck: {
+            return TMInstructionFailureButtonCheck;
+            break;
+        }
+        default: {
+            break;
+        }
+    }
+}
+
+- (TMInstructionSuccess)handleSuccess:(NSString *)successCode{
+    if ([successCode isEqualToString:[self strConnect:@"" :@"[TM06SUC000" :11]]){
+        return TMInstructionSuccessPair;
+    }else if ([successCode isEqualToString:[self strConnect:@"" :@"[TM06SUC100" :11]]){
+        return TMInstructionSuccessWhsitle;
+    }else if ([successCode isEqualToString:[self strConnect:@"" :@"[TM06SUC200" :11]]){
+        return TMInstructionSuccessUnlock;
+    }else if ([successCode isEqualToString:[self strConnect:@"" :@"[TM06SUC300" :11]]){
+        return TMInstructionSuccessFire;
+    }else if ([successCode isEqualToString:[self strConnect:@"" :@"[TM06SUC400" :11]]){
+        return TMInstructionSuccessLock;
+    }else if ([successCode isEqualToString:[self strConnect:@"" :@"[TM06SUC600" :11]]){
+        return TMInstructionSuccessCheckVersion;
+    }else{
+        return TMInstructionSuccessReturnCar;
+    }
+}
+
+- (void)handleFailure:(NSString *)errorCode
+{
+    TMInstructionFailure instruction = TMInstructionFailureUnKnow;
+    if (errorCode == nil) {
+        //表示处理未知的指令
+        if (self.currentInstruction == MTInstructionTCUPair) {
+            //执行三次
+            count ++;
+            if (count < 3) {
+                [self TCUPostRequestWithInstruction:MTInstructionTCUPair firePin:nil];
+                return;
+            }
+        }
+    }else{
+        if ([errorCode isEqualToString:[self strConnect:@"" :@"[TM06ERR001" :11]]){
+            instruction = TMInstructionFailurePairOrderLock;
+        }else if ([errorCode isEqualToString:[self strConnect:@"" :@"[TM06ERR002" :11]]){
+            instruction = TMInstructionFailurePairCodeError;
+        }else if ([errorCode isEqualToString:[self strConnect:@"" :@"[TM06ERR302" :11]]){
+            instruction = TMInstructionFailureFireCodeError;
+        }else if ([errorCode isEqualToString:[self strConnect:@"" :@"[TM06ERR303" :11]]){
+            instruction = TMInstructionFailureFirePullCharningLine;
+        }else if ([errorCode isEqualToString:[self strConnect:@"" :@"[TM06ERR502" :11]]){
+            instruction = TMInstructionFailureReturnInsertChargingLine;
+        }else if ([errorCode isEqualToString:[self strConnect:@"" :@"[TM06ERR503" :11]]){
+            instruction = TMInstructionFailureReturnUnChargeing;
+        }else if ([errorCode isEqualToString:[self strConnect:@"" :@"[TM06ERR504" :11]]){
+            instruction = TMInstructionFailureReturnKeyNotOff;
+        }else if ([errorCode isEqualToString:[self strConnect:@"" :@"[TM06ERR505" :11]]){
+            instruction = TMInstructionFailureReturnUnlock;
+        }else if ([errorCode isEqualToString:[self strConnect:@"" :@"[TM06ERR506" :11]]){
+            instruction = TMInstructionFailureReturnWrongStation;
+        }else if ([errorCode isEqualToString:[self strConnect:@"" :@"[TM06ERR101" :11]] ||
+                  [errorCode isEqualToString:[self strConnect:@"" :@"[TM06ERR201" :11]] ||
+                  [errorCode isEqualToString:[self strConnect:@"" :@"[TM06ERR401" :11]]){
+            instruction = TMInstructionFailureCarIsRunning;
+        }else if ([errorCode isEqualToString:[self strConnect:@"" :@"[TM06ERR999" :11]]){
+            instruction = TMInstructionFailureCheckError;
+        }else if ([errorCode isEqualToString:[self strConnect:@"" :@"[TM06ERR801" :11]]){
+            instruction = TMInstructionFailureGprsError;
+        }else if ([errorCode isEqualToString:[self strConnect:@"" :@"[TM06ERR802" :11]]){
+            instruction = TMInstructionFailureGpsError;
+        }else if ([errorCode isEqualToString:[self strConnect:@"" :@"[TM06ERR803" :11]]){
+            instruction = TMInstructionFailureEppromError;
+        }else if ([errorCode isEqualToString:[self strConnect:@"" :@"[TM06ERR804" :11]]){
+            instruction = TMInstructionFailureCanError;
+        }else{
+            instruction = TMInstructionFailureUnKnow;
+        }
+    }
+    if ([self.delegate respondsToSelector:@selector(requestToTCUFailure:)]) {
+        //指令校验错误，可能是数据丢失,数据写入失败之类
+        if (instruction == TMInstructionFailureUnKnow) {
+            [self.delegate requestToTCUFailure:[self transformUnknowInstruction]];
+        }else{
+            [self.delegate requestToTCUFailure:instruction];
+        }
+    }
+    count = 0;
+}
+-(void)analyse:(NSData*) value
+{
+    if (requestTimeout == NO) {
+        //收到指令重置定时器
+        [self stopRequestTime];
+        if (value == nil) {
+            [self handleFailure:nil];
+        }else{
+            NSString* str=[[NSString alloc] initWithData:value encoding:NSASCIIStringEncoding];
+            NSLog(@"接收到TBOX指令---------:%@",str);
+            NSRange endSignal = [str rangeOfString:@"]"];
+            NSRange startSignal = [str rangeOfString:@"["];
+            if (startSignal.location != NSNotFound) {
+                self.data = nil;
+            }
+            if (endSignal.location != NSNotFound) {
+                if (self.data) {
+                    [self.data appendData:value];
+                }else{
+                    self.data = [[NSMutableData alloc] initWithData:value];
+                }
+                NSString *completeStr = [[NSString alloc] initWithData:self.data encoding:NSASCIIStringEncoding];
+                NSRange unlockTime = [completeStr rangeOfString:@"UTM"];
+                NSRange startTime = [completeStr rangeOfString:@"STM"];
+                NSRange returnTime = [completeStr rangeOfString:@"RTM"];
+                NSRange checkGps = [completeStr rangeOfString:@"GPS"];
+                NSRange success = [completeStr rangeOfString:@"TM06SUC"];
+                NSRange gprsError = [completeStr rangeOfString:@"ERR801"];
+                NSRange gpsError = [completeStr rangeOfString:@"ERR802"];
+                NSRange eppromError = [completeStr rangeOfString:@"ERR803"];
+                NSRange canError = [completeStr rangeOfString:@"ERR804"];
+                NSRange error = [completeStr rangeOfString:@"TM06ERR"];
+                NSRange parameter = [completeStr rangeOfString:@"PAR"];
+                NSRange iccid = [completeStr rangeOfString:@"ICC"];
+                NSRange tboxVersion = [completeStr rangeOfString:@"VER"];
+                NSRange buttonUp = [completeStr rangeOfString:@"BUTUP"];
+                NSRange buttonDown = [completeStr rangeOfString:@"BUTDOWN"];
+                if (gprsError.location != NSNotFound) {
+                    if ([self.delegate respondsToSelector:@selector(requestToTCUFailure:)]) {
+                        [self.delegate requestToTCUFailure:TMInstructionFailureGprsError];
+                    }
+                }
+                if (gpsError.location != NSNotFound) {
+                    if ([self.delegate respondsToSelector:@selector(requestToTCUFailure:)]) {
+                        [self.delegate requestToTCUFailure:TMInstructionFailureGpsError];
+                    }
+                }
+                if (eppromError.location != NSNotFound) {
+                    if ([self.delegate respondsToSelector:@selector(requestToTCUFailure:)]) {
+                        [self.delegate requestToTCUFailure:TMInstructionFailureEppromError];
+                    }
+                }
+                if (canError.location != NSNotFound) {
+                    if ([self.delegate respondsToSelector:@selector(requestToTCUFailure:)]) {
+                        [self.delegate requestToTCUFailure:TMInstructionFailureCanError];
+                    }
+                }
+                if (unlockTime.location != NSNotFound) {
+                    NSRange lengthRange = {3,2};
+                    NSString *lengthStr = [completeStr substringWithRange:lengthRange];
+                    NSInteger length = lengthStr.integerValue - 3;
+                    NSRange openTimeRange = {8,length};
+                    self.firstOpenTime = [completeStr substringWithRange:openTimeRange];
+                }else if (startTime.location != NSNotFound){
+                    NSRange lengthRange = {3,2};
+                    NSString *lengthStr = [completeStr substringWithRange:lengthRange];
+                    NSInteger length = lengthStr.integerValue - 3;
+                    NSRange openTimeRange = {8,length};
+                    self.firstFireTime = [completeStr substringWithRange:openTimeRange];
+                }else if (returnTime.location != NSNotFound){
+                    NSRange lengthRange = {3,2};
+                    NSString *lengthStr = [completeStr substringWithRange:lengthRange];
+                    NSInteger length = lengthStr.integerValue - 3;
+                    NSRange openTimeRange = {8,length};
+                    self.returnCarTime = [completeStr substringWithRange:openTimeRange];
+                    if ([self.delegate respondsToSelector:@selector(requestToTCUSuccess:)]) {
+                        [self.delegate requestToTCUSuccess:TMInstructionSuccessReturnCar];
+                    }
+                }else if (checkGps.location != NSNotFound){
+                    NSRange lengthRange = {3,2};
+                    NSString *lengthStr = [completeStr substringWithRange:lengthRange];
+                    NSInteger length = lengthStr.integerValue - 7;
+                    NSRange GPSRange = {8,length};
+                    self.checkGps = [completeStr substringWithRange:GPSRange];
+                    if ([self.delegate respondsToSelector:@selector(requestToTCUSuccess:)]) {
+                        [self.delegate requestToTCUSuccess:TMInstructionSuccessGPS];
+                    }
+                }else if (parameter.location != NSNotFound){
+                    NSRange lengthRange = {3,2};
+                    NSString *lengthStr = [completeStr substringWithRange:lengthRange];
+                    NSInteger length = lengthStr.integerValue - 3;
+                    NSRange parameterRange = {8,length};
+                    self.parameter = [completeStr substringWithRange:parameterRange];
+                    if ([self.delegate respondsToSelector:@selector(requestToTCUSuccess:)]) {
+                        [self.delegate requestToTCUSuccess:TMInstructionSuccessGetParameter];
+                    }
+                }else if (iccid.location != NSNotFound){
+                    NSRange lengthRange = {3,2};
+                    NSString *lengthStr = [completeStr substringWithRange:lengthRange];
+                    NSInteger length = lengthStr.integerValue - 3;
+                    NSRange iccidRange = {8,length};
+                    self.parameter = [completeStr substringWithRange:iccidRange];
+                    if ([self.delegate respondsToSelector:@selector(requestToTCUSuccess:)]) {
+                        [self.delegate requestToTCUSuccess:TMInstructionSuccessGetParameter];
+                    }
+                }else if (tboxVersion.location != NSNotFound){
+                    NSRange lengthRange = {3,2};
+                    NSString *lengthStr = [completeStr substringWithRange:lengthRange];
+                    NSInteger length = lengthStr.integerValue - 3;
+                    NSRange parameterRange = {8,length};
+                    self.parameter = [completeStr substringWithRange:parameterRange];
+                    if ([self.delegate respondsToSelector:@selector(requestToTCUSuccess:)]) {
+                        [self.delegate requestToTCUSuccess:TMInstructionSuccessGetParameter];
+                    }
+                }else if (buttonUp.location != NSNotFound){
+                    if ([self.delegate respondsToSelector:@selector(requestToTCUSuccess:)]) {
+                        [self.delegate requestToTCUSuccess:TMInstructionSuccessButtonUp];
+                    }
+                }else if (buttonDown.location != NSNotFound){
+                    if ([self.delegate respondsToSelector:@selector(requestToTCUSuccess:)]) {
+                        [self.delegate requestToTCUSuccess:TMInstructionSuccessButtonDown];
+                    }
+                }else if (success.location != NSNotFound) {
+                    count = 0;
+                    if ([self.delegate respondsToSelector:@selector(requestToTCUSuccess:)]) {
+                        [self.delegate requestToTCUSuccess:[self handleSuccess:str]];
+                    }
+                }
+                else if (error.location != NSNotFound){
+                    [self handleFailure:completeStr];
+                }else{
+                    [self handleFailure:nil];
+                }
+            }else{
+                if (self.data) {
+                    [self.data appendData:value];
+                }else{
+                    self.data = [[NSMutableData alloc] initWithData:value];
+                }
+            }
+        }
+    }
+    requestTimeout = NO;
+}
+
+- (void)timer_callback
+{
+    if (self.bleInfo!=nil) {
+        [self.bleInfo.discoveredPeripheral readRSSI];
+        if ([self.delegate respondsToSelector:@selector(timerToShow:)]) {
+            [self.delegate timerToShow:self.bleInfo.discoveredPeripheral.RSSI];
+        }
+    }
+}
+
+-(NSString*)strConnect:(NSString*)stringStart :(NSString*)stringMiddle :(int)length
+{
+    NSString* temp=stringStart;
+    NSString* tail=[self computeVerify:stringMiddle :length];
+    temp=[[[temp stringByAppendingString:stringMiddle] stringByAppendingString:tail] stringByAppendingString:@"]"];
+    //NSLog(@"%@",temp);
+    return temp;
+}
+
+- (NSString*)computeVerify:(NSString*)string :(int)length
+{
+    const char* data=[string cStringUsingEncoding:NSASCIIStringEncoding];
+    char temp=0;
+    for (int i=0; i<length; i++) {
+        temp^=data[i];
+    }
+    NSString *str=[[NSString alloc] initWithFormat:@"%02X",temp];
+    return str;
+}
+
+#pragma mark - Public API
+- (void)start:(NSString*)carName withId:(NSString *)identify
+{
+    if (self.bleInfo.discoveredPeripheral.state == CBPeripheralStateDisconnected) {
+        if ([self.delegate respondsToSelector:@selector(scanning)]) {
+            [self.delegate scanning];
+        }
+        [self.centralMgr scanForPeripheralsWithServices:nil options:nil];
+        self.carName=carName;
+        self.identify=identify;
+    }
+}
+
+- (void)cancelPeripheral
+{
+    if (self.bleInfo.discoveredPeripheral.state !=  CBPeripheralStateDisconnected) {
+        [self.centralMgr cancelPeripheralConnection:self.bleInfo.discoveredPeripheral];
+        self.bleInfo = nil;
+        self.centralMgr = nil;
+    }
+}
+
+- (void)stop
+{
+    [self.centralMgr stopScan];
+}
+
+- (void)TCUPostRequestWithInstruction:(MTInstruction )instruction firePin:(NSString *)pin
+{
+    self.currentInstruction = instruction;
+    //每次发送新的请求前，先将旧的数据清空
+    self.data = nil;
+    if (self.value != nil) {
+        [self startRequestTime];
+        if (instruction == MTInstructionFireCar) {
+            self.pin = pin;
+        }
+        NSData *sendTCUData = [self transformInstructionWithUserOpertion:instruction];
+        [self.bleInfo.discoveredPeripheral writeValue:sendTCUData forCharacteristic:self.value type:CBCharacteristicWriteWithResponse];
+    }
+}
+
+#pragma mark - CBCentralManagerDelegate
+- (void)centralManagerDidUpdateState:(CBCentralManager *)central
+{
+    NSLog(@"当前蓝牙的状态----------%ld",(long)central.state);
+    switch (central.state) {
+        case CBCentralManagerStateUnsupported:
+            if ([self.delegate respondsToSelector:@selector(centralManagerUnsportted)]) {
+                [self.delegate centralManagerUnsportted];
+            }
+            break;
+        case CBCentralManagerStatePoweredOn:
+            [self.centralMgr scanForPeripheralsWithServices:nil options:nil];
+            break;
+        case CBCentralManagerStatePoweredOff:
+        {
+            if ([self.delegate respondsToSelector:@selector(centralManagerStatePoweredOff)]) {
+                [self.delegate centralManagerStatePoweredOff];
+            }
+        }
+            break;
+        default:
+            break;
+    }
+}
+
+- (void)centralManager:(CBCentralManager *)central
+ didDiscoverPeripheral:(CBPeripheral *)peripheral
+     advertisementData:(NSDictionary *)advertisementData
+                  RSSI:(NSNumber *)RSSI
+{
+    //这里不用periphera.name是因为如果第二次链接时，蓝牙名称变了之后，name还是显示修改之前的蓝牙名称
+    NSString *peripheralName = [advertisementData objectForKey:CBAdvertisementDataLocalNameKey];
+    NSLog(@"蓝牙名称:%@-%@ 当前蓝牙强度:%ld",peripheralName,peripheral.name,(long)RSSI.integerValue);
+    if ([peripheralName isEqualToString:self.carName]) {
+        NSLog(@"当前的TBOX----------:%@ %@",peripheral.identifier.UUIDString,peripheral.name);
+        //停止扫描
+        [self stop];
+        //保存需要配对的TBOX信息
+        BLEInfo *discoveredBLEInfo             = [[BLEInfo alloc] init];
+        discoveredBLEInfo.discoveredPeripheral = peripheral;
+        discoveredBLEInfo.rssi                 = RSSI;
+        self.bleInfo                           = discoveredBLEInfo;
+        //链接TBOX
+        [self.centralMgr connectPeripheral:peripheral options:nil];
+    }
+}
+
+- (void)centralManager:(CBCentralManager *)central
+didFailToConnectPeripheral:(CBPeripheral *)peripheral
+                 error:(NSError *)error
+{
+    NSLog(@"didFailToConnectPeripheral : %@", error.localizedDescription);
+    if ([self.delegate respondsToSelector:@selector(failToConnect)]) {
+        [self.delegate failToConnect];
+    }
+    [self cleanup];
+}
+
+-(void)centralManager:(CBCentralManager *)central
+didDisconnectPeripheral:(CBPeripheral *)peripheral
+                error:(NSError *)error
+{
+    NSLog(@"didDisconnectPeripheral : %@",error.localizedDescription);
+    if ([self.delegate respondsToSelector:@selector(didDisConnect)]) {
+        [self.delegate didDisConnect];
+    }
+    self.bleInfo =  nil;
+    [self.centralMgr scanForPeripheralsWithServices:nil options:nil];
+}
+
+- (void)centralManager:(CBCentralManager *)central
+  didConnectPeripheral:(CBPeripheral *)peripheral
+{
+    
+    if ([self.delegate respondsToSelector:@selector(didConnect)]) {
+        [self.delegate didConnect];
+    }
+    [self.bleInfo.discoveredPeripheral setDelegate:self];
+    [self.bleInfo.discoveredPeripheral discoverServices:nil];
+}
+
+#pragma mark - CBPeripheralDelegate
+- (void)peripheral:(CBPeripheral *)peripheral didDiscoverServices:(NSError *)error
+{
+    if (error)
+    {
+        NSLog(@"didDiscoverServices : %@", [error localizedDescription]);
+        [self cleanup];
+        return;
+    }
+    
+    for (CBService *s in peripheral.services)
+    {
+        NSLog(@"Service found with UUID : %@", s.UUID);
+        if ([s.UUID isEqual:[CBUUID UUIDWithString:@"FFF0"]]) {
+            [s.peripheral discoverCharacteristics:nil forService:s];
+        }
+        if ([s.UUID isEqual:[CBUUID UUIDWithString:@"FFE0"]]) {
+            [s.peripheral discoverCharacteristics:nil forService:s];
+        }
+    }
+}
+
+- (void)peripheral:(CBPeripheral *)peripheral didDiscoverCharacteristicsForService:(CBService *)service error:(NSError *)error
+{
+    if (error)
+    {
+        NSLog(@"didDiscoverCharacteristicsForService error : %@", [error localizedDescription]);
+        [self cleanup];
+        return;
+    }
+    
+    for (CBCharacteristic *characteristic in service.characteristics)
+    {
+        if ([characteristic.UUID isEqual:[CBUUID UUIDWithString:@"FFF1"]])
+        {
+            NSLog(@"Discovered read characteristics:%@ for service: %@", characteristic.UUID, service.UUID);
+            self.value = characteristic;//保存读的特征
+            [self startSubscribe];
+            //[self TCUPostRequestWithInstruction:MTInstructionCheckVersion firePin:nil];
+            [self TCUPostRequestWithInstruction:MTInstructionTCUPair firePin:nil];//配对
+        }
+        if ([characteristic.UUID isEqual:[CBUUID UUIDWithString:@"FFE1"]])
+        {
+            NSLog(@"Discovered read characteristics:%@ for service: %@", characteristic.UUID, service.UUID);
+            self.value= characteristic;//保存读的特征
+            [self startSubscribe];
+            //[self TCUPostRequestWithInstruction:MTInstructionCheckVersion firePin:nil];
+            [self TCUPostRequestWithInstruction:MTInstructionTCUPair firePin:nil];//配对
+        }
+    }
+    
+}
+
+- (void)peripheral:(CBPeripheral *)peripheral
+didUpdateValueForCharacteristic:(CBCharacteristic *)characteristic
+             error:(NSError *)error
+{
+    if (error)
+    {
+        NSLog(@"Error discovering characteristics : %@", error.localizedDescription);
+        [self analyse:nil];
+        return;
+    }
+    NSLog(@"%@ %@",characteristic.value,characteristic.UUID);
+    if (characteristic.value != nil) {
+        [self analyse:characteristic.value];
+    }
+}
+
+-(void)peripheral:(CBPeripheral *)peripheral
+didUpdateNotificationStateForCharacteristic:(CBCharacteristic *)characteristic
+            error:(NSError *)error
+{
+    NSLog(@"%@ %@",characteristic.value,characteristic.UUID);
+    if (error)
+    {
+        NSLog(@"didUpdateNotificationStateForCharacteristic error : %@", error.localizedDescription);
+        [self analyse:nil];
+        return;
+    }
+    if (characteristic.value != nil) {
+        [self analyse:characteristic.value];
+    }
+}
+
+-(void)peripheral:(CBPeripheral *)peripheral
+didWriteValueForCharacteristic:(CBCharacteristic *)characteristic
+            error:(NSError *)error
+{
+    if (error)
+    {
+        NSLog(@"Write %@ : %@%@", characteristic.UUID,[error localizedDescription],error.description);
+        [self analyse:nil];
+        return;
+    }
+    NSLog(@"didWriteValueForCharacteristic %@",characteristic.UUID);
+}
+
+
+#pragma mark - Private Method
+//监听设备
+- (void)startSubscribe
+{
+    [self.bleInfo.discoveredPeripheral setNotifyValue:YES forCharacteristic:self.value];
+}
+- (void)cancelSubscribe
+{
+    [self.bleInfo.discoveredPeripheral setNotifyValue:NO forCharacteristic:self.value];
+}
+/**
+ *  如果在蓝牙配对、链接过程中发生错误，调用此方法，取消已经订阅的服务和特征
+ */
+- (void)cleanup
+{
+    // 如果还未链接，什么都不做
+    if (self.bleInfo.discoveredPeripheral.state == CBPeripheralStateDisconnected) {
+        return;
+    }
+    
+    // 如果我们已经订阅了蓝牙的相关服务
+    if (self.bleInfo.discoveredPeripheral.services != nil) {
+        for (CBService *service in self.bleInfo.discoveredPeripheral.services) {
+            if (service.characteristics != nil) {
+                for (CBCharacteristic *characteristic in service.characteristics) {
+                    if ([characteristic.UUID isEqual:[CBUUID UUIDWithString:@"FFE1"]]
+                        || [characteristic.UUID isEqual:[CBUUID UUIDWithString:@"FFF1"]]) {
+                        if (characteristic.isNotifying) {
+                            // 取消监听
+                            [self cancelSubscribe];
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // 取消蓝牙链接就行了
+    [self cancelPeripheral];
+}
+
+
+@end

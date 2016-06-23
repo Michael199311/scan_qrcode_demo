@@ -1,0 +1,9 @@
+#import "CRRequestManager.h"
+#import "MJExtension.h"
+
+
+#define TMS_BASE_URL                             @"http://testapi.bimayun.com/"
+//#define TMS_BASE_URL                             @"http://121.41.41.254:8082/"
+
+#define TMS_LOCS                               @"locs/"
+

@@ -1,0 +1,27 @@
+//
+//  PrefixHeader.pch
+//  scan_qrcode_demo
+//
+//  Created by Codger on 16/4/27.
+//
+//
+
+#import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
+
+
+
+#ifndef PrefixHeader_pch
+#define PrefixHeader_pch
+
+#import "UIView+LayoutMethods.h"
+#import "UIView+CRAdditions.h"
+#import "SVProgressHUD.h"
+#import "NSString+Additions.h"
+#import "CRMessageMarco.h"
+#import "CRUITermMarco.h"
+
+// Include any system framework and library headers here that should be included in all compilation units.
+// You will also need to set the Prefix Header build setting of one or more of your targets to reference this file.
+
+#endif /* PrefixHeader_pch */

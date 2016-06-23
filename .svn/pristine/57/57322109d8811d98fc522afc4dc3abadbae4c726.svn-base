@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<document type="com.apple.InterfaceBuilder3.CocoaTouch.XIB" version="3.0" toolsVersion="10116" systemVersion="15A284" targetRuntime="iOS.CocoaTouch" propertyAccessControl="none" useAutolayout="YES">
+    <dependencies>
+        <deployment identifier="iOS"/>
+        <plugIn identifier="com.apple.InterfaceBuilder.IBCocoaTouchPlugin" version="10085"/>
+        <capability name="Aspect ratio constraints" minToolsVersion="5.1"/>
+    </dependencies>
+    <objects>
+        <placeholder placeholderIdentifier="IBFilesOwner" id="-1" userLabel="File's Owner"/>
+        <placeholder placeholderIdentifier="IBFirstResponder" id="-2" customClass="UIResponder"/>
+        <view contentMode="scaleToFill" id="yPx-xH-XPm" customClass="CRBimaSwitch">
+            <rect key="frame" x="0.0" y="0.0" width="115.5" height="49"/>
+            <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMaxY="YES"/>
+            <subviews>
+                <imageView userInteractionEnabled="NO" contentMode="scaleToFill" horizontalHuggingPriority="251" verticalHuggingPriority="251" image="Usecar_switchBar" translatesAutoresizingMaskIntoConstraints="NO" id="xEK-O2-dWx">
+                    <rect key="frame" x="17.5" y="14" width="81" height="16"/>
+                    <constraints>
+                        <constraint firstAttribute="height" constant="16" id="7L6-qe-EM4"/>
+                        <constraint firstAttribute="width" secondItem="xEK-O2-dWx" secondAttribute="height" multiplier="81:16" id="sdU-iU-TTk"/>
+                    </constraints>
+                </imageView>
+                <imageView userInteractionEnabled="NO" contentMode="scaleToFill" horizontalHuggingPriority="251" verticalHuggingPriority="251" image="Usecar_leftBar" translatesAutoresizingMaskIntoConstraints="NO" id="74g-lz-MKa">
+                    <rect key="frame" x="0.0" y="0.0" width="50" height="49"/>
+                    <constraints>
+                        <constraint firstAttribute="width" secondItem="74g-lz-MKa" secondAttribute="height" multiplier="50:49" id="trs-HI-TUy"/>
+                    </constraints>
+                </imageView>
+            </subviews>
+            <color key="backgroundColor" white="1" alpha="1" colorSpace="calibratedWhite"/>
+            <constraints>
+                <constraint firstItem="74g-lz-MKa" firstAttribute="top" secondItem="yPx-xH-XPm" secondAttribute="top" id="04G-23-K1D"/>
+                <constraint firstItem="74g-lz-MKa" firstAttribute="leading" secondItem="yPx-xH-XPm" secondAttribute="leading" id="8iU-Rw-9qT"/>
+                <constraint firstAttribute="bottom" secondItem="74g-lz-MKa" secondAttribute="bottom" id="IiK-zC-AWo"/>
+                <constraint firstItem="xEK-O2-dWx" firstAttribute="centerX" secondItem="yPx-xH-XPm" secondAttribute="centerX" id="MwR-Te-5Jm"/>
+                <constraint firstItem="xEK-O2-dWx" firstAttribute="top" secondItem="yPx-xH-XPm" secondAttribute="top" constant="14" id="cCX-vt-6LL"/>
+            </constraints>
+            <nil key="simulatedStatusBarMetrics"/>
+            <freeformSimulatedSizeMetrics key="simulatedDestinationMetrics"/>
+            <connections>
+                <outlet property="switchBall" destination="74g-lz-MKa" id="2Ur-pz-0H0"/>
+                <outlet property="switchBar" destination="xEK-O2-dWx" id="uAQ-gG-hMu"/>
+            </connections>
+            <point key="canvasLocation" x="449.75" y="178.5"/>
+        </view>
+    </objects>
+    <resources>
+        <image name="Usecar_leftBar" width="50" height="49"/>
+        <image name="Usecar_switchBar" width="81" height="16"/>
+    </resources>
+</document>
